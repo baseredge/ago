@@ -14,6 +14,8 @@
 
 `ago` 是一个极简的通用 AI Agent 底座，用 Go 编写。每个 agent 独立 goroutine + 独立消息 channel，实现超高并发。复用 [opencode](https://github.com/sst/opencode) 的 `opencode.json` 配置格式，开箱即用。
 
+适合作为 **coding agent** / **agentic workflow** / **LLM tool-use** 项目的底层 runtime，也可直接当作 **CLI coding assistant** 使用。
+
 **特点：**
 
 - **极简**：单二进制文件，零外部依赖，核心代码精简
@@ -80,6 +82,16 @@ go build -o bin\ago.exe ./cmd/ago
 | OpenAI 兼容 | OpenAI / Zen(chat 端点) / OpenRouter / DeepSeek / GLM / Kimi / MiniMax / Grok |
 | Anthropic Messages | Anthropic Claude / Zen(messages 端点) |
 
+支持调用的模型系列（通过配置切换）：
+- **Claude** 系列（Anthropic Messages 协议）：claude-sonnet-5、claude-opus 等
+- **GPT** 系列（OpenAI 协议）：gpt-4o、gpt-4-turbo 等
+- **DeepSeek** 系列（OpenAI 兼容）：deepseek-v4-flash-free、deepseek-chat、deepseek-coder 等
+- **GLM** 系列（OpenAI 兼容）：glm-4-plus、glm-4-flash 等
+- **Grok** 系列（OpenAI 兼容）：grok-3、grok-2 等
+- **Kimi** 系列（OpenAI 兼容）：moonshot-v1 等
+- **MiniMax** 系列（OpenAI 兼容）：abab6.5 等
+- **免费模型**（opencode Zen 网关，零成本）：deepseek-v4-flash-free 等
+
 ---
 
 ## 项目结构
@@ -123,3 +135,19 @@ ago/
 
 本项目基于 opencode 的设计思路用 Go 重新实现，未直接复制其源代码。
 opencode 原项目版权归属 sst 团队，详见 https://github.com/sst/opencode
+
+---
+
+## Keywords
+
+<!-- SEO 关键词段，便于 GitHub 搜索和搜索引擎索引 -->
+
+`ai agent` `agent runtime` `agentic` `agentic workflow` `multi-agent` `subagent` `coding agent` `coding assistant` `cli coding assistant` `code agent` `tool use` `tool-use` `function calling` `llm agent` `llm runtime`
+
+`go` `golang` `gopher` `goroutine` `channel` `concurrent` `high-concurrency` `minimalist` `single binary` `zero dependency`
+
+`llm` `large language model` `chatgpt` `openai` `anthropic` `claude` `deepseek` `glm` `grok` `kimi` `minimax` `openrouter` `zen` `free model` `free llm`
+
+`streaming` `sse` `server-sent events` `stream complete` `opencode compatible` `opencode.json` `config compatible`
+
+`trae` `glm-5.2` `ai-assisted development` `clean room reimplementation` `hacktoberfest`
