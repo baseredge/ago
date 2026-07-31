@@ -1,8 +1,12 @@
 package tool_test
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"ago/internal/tool"
@@ -184,11 +188,115 @@ func TestTaskHandlerNotSet(t *testing.T) {
 	tool.TaskHandler = nil
 	defer func() { tool.TaskHandler = original }()
 
-	_, err := tool.Task(tool.TaskInput{
+	_, err := tool.Task(context.Background(), tool.TaskInput{
 		SubagentName: "test",
 		Prompt:       "test",
 	})
 	if err != tool.ErrTaskHandlerNotSet {
 		t.Errorf("error = %v, want %v", err, tool.ErrTaskHandlerNotSet)
+	}
+}
+
+// TestTaskInputDepthNotSerialized 测试 Depth 字段不参与 JSON 序列化
+// （LLM 不感知该字段，由 agent 层内部注入）
+func TestTaskInputDepthNotSerialized(t *testing.T) {
+	input := tool.TaskInput{
+		SubagentName: "research",
+		Prompt:       "do something",
+		Depth:        5,
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	s := string(data)
+	if strings.Contains(s, "depth") || strings.Contains(s, "Depth") {
+		t.Errorf("Depth should not be serialized, got %s", s)
+	}
+	// 反序列化后 Depth 应为 0
+	var decoded tool.TaskInput
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if decoded.Depth != 0 {
+		t.Errorf("decoded Depth = %d, want 0 (not serialized)", decoded.Depth)
+	}
+}
+
+// TestBashSuccess 测试执行成功命令
+func TestBashSuccess(t *testing.T) {
+	var cmd string
+	if runtime.GOOS == "windows" {
+		cmd = "echo hello"
+	} else {
+		cmd = "echo hello"
+	}
+	result, err := tool.Bash(tool.BashInput{Command: cmd})
+	if err != nil {
+		t.Fatalf("Bash failed: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.Stdout, "hello") {
+		t.Errorf("Stdout = %q, want contains 'hello'", result.Stdout)
+	}
+}
+
+// TestBashFailure 测试非零退出码
+func TestBashFailure(t *testing.T) {
+	var cmd string
+	if runtime.GOOS == "windows" {
+		cmd = "cmd /c exit 42"
+	} else {
+		cmd = "exit 42"
+	}
+	result, err := tool.Bash(tool.BashInput{Command: cmd})
+	if err != nil {
+		t.Fatalf("Bash should not return error for non-zero exit: %v", err)
+	}
+	if result.ExitCode != 42 {
+		t.Errorf("ExitCode = %d, want 42", result.ExitCode)
+	}
+}
+
+// TestBashEmptyCommand 测试空命令报错
+func TestBashEmptyCommand(t *testing.T) {
+	_, err := tool.Bash(tool.BashInput{Command: ""})
+	if err == nil {
+		t.Error("expected error for empty command")
+	}
+}
+
+// TestBashTimeout 测试超时
+func TestBashTimeout(t *testing.T) {
+	var cmd string
+	if runtime.GOOS == "windows" {
+		cmd = "ping -n 10 127.0.0.1 > nul"
+	} else {
+		cmd = "sleep 10"
+	}
+	_, err := tool.Bash(tool.BashInput{Command: cmd, TimeoutSec: 1})
+	if err == nil {
+		t.Error("expected timeout error")
+	}
+}
+
+// TestBashWorkDir 测试工作目录
+func TestBashWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	var cmd string
+	if runtime.GOOS == "windows" {
+		cmd = "cd"
+	} else {
+		cmd = "pwd"
+	}
+	result, err := tool.Bash(tool.BashInput{Command: cmd, WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Bash failed: %v", err)
+	}
+	// 输出应包含目标目录路径（不同平台大小写/斜杠可能不同，用 ToLower 比较）
+	if !strings.Contains(strings.ToLower(result.Stdout), strings.ToLower(dir)) {
+		t.Errorf("Stdout = %q, want contains %q", result.Stdout, dir)
 	}
 }

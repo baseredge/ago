@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"ago/internal/base"
 	"ago/internal/config"
@@ -13,9 +12,6 @@ import (
 	"ago/internal/tool"
 	"ago/internal/transport"
 )
-
-// subagentTimeout 子代理调用默认超时，防止 LLM 异常时 goroutine 泄漏。
-const subagentTimeout = 5 * time.Minute
 
 // SubagentManager 管理子代理的创建和调用。
 // 实现主代理通过 task 工具调用子代理的逻辑。
@@ -45,7 +41,18 @@ func NewSubagentManager(hub *transport.Hub, factory *provider.Factory, cfg *conf
 
 // executeTask 是 task 工具的实际执行函数（注入到 tool.TaskHandler）。
 // 根据子代理名查找配置，创建独立 goroutine 的子代理，同步等待结果。
-func (m *SubagentManager) executeTask(input tool.TaskInput) (*tool.TaskResult, error) {
+func (m *SubagentManager) executeTask(ctx context.Context, input tool.TaskInput) (*tool.TaskResult, error) {
+	// 深度检查：防止子 agent 递归失控。
+	// 上限取配置 subagent_depth；若未配置（0）则用 defaultSubagentDepth 兜底保护。
+	childDepth := input.Depth + 1
+	depthLimit := m.cfg.SubagentDepth
+	if depthLimit <= 0 {
+		depthLimit = defaultSubagentDepth
+	}
+	if childDepth > depthLimit {
+		return nil, fmt.Errorf("subagent depth %d exceeds limit %d (parent depth=%d)", childDepth, depthLimit, input.Depth)
+	}
+
 	// 查找子代理配置
 	agentCfg, ok := m.cfg.Agents[input.SubagentName]
 	if !ok {
@@ -61,10 +68,13 @@ func (m *SubagentManager) executeTask(input tool.TaskInput) (*tool.TaskResult, e
 		return nil, fmt.Errorf("no model configured for subagent %q", input.SubagentName)
 	}
 
+	// 解析子代理步数：agent 配置优先，否则回退到默认值
+	steps := agentCfg.ResolveSteps(defaultAgentSteps)
+
 	// 生成唯一 agent ID
 	subID := fmt.Sprintf("%s-sub-%s-%d", m.parentID, input.SubagentName, m.counter.Add(1))
 
-	// 创建子代理
+	// 创建子代理（注入深度、步数、任务预算）
 	subAgent, err := New(
 		subID,
 		model,
@@ -74,6 +84,9 @@ func (m *SubagentManager) executeTask(input tool.TaskInput) (*tool.TaskResult, e
 		WithSystem(agentCfg.System),
 		WithMode(agentCfg.Mode),
 		WithTools(agentCfg.Tools),
+		WithSteps(steps),
+		WithDepth(childDepth),
+		WithTaskBudget(agentCfg.TaskBudget),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create subagent: %w", err)
@@ -92,9 +105,7 @@ func (m *SubagentManager) executeTask(input tool.TaskInput) (*tool.TaskResult, e
 		m.mu.Unlock()
 	}()
 
-	// 启动子代理（带超时，防止 LLM 异常时 goroutine 泄漏）
-	ctx, cancel := context.WithTimeout(context.Background(), subagentTimeout)
-	defer cancel()
+	// 启动子代理（ctx 来自父 agent，父 agent cancel 时子 agent 自动中止，对齐原版）
 	if err := subAgent.Start(ctx); err != nil {
 		return nil, fmt.Errorf("start subagent: %w", err)
 	}

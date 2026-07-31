@@ -23,7 +23,7 @@ type AgentRuntime struct {
 	Model    string            // 完整模型 ID（provider/model）
 	System   string            // 系统提示词
 	Mode     string            // primary/subagent/all
-	Tools    []string          // 工具白名单（空表示全部）
+	Tools    map[string]bool   // 工具启用映射（nil=继承全部；非空按 map 控制，未列出=禁用）
 	Provider provider.Provider // LLM provider
 	ModelID  string            // 不含 provider 前缀的模型 ID
 	Hub      *transport.Hub    // 通信中枢
@@ -33,7 +33,20 @@ type AgentRuntime struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	started  atomic.Bool
+	steps    int // 最大工具调用轮数（0 用默认值）
+	depth    int // 当前子代理嵌套深度（主代理=0，每调一层+1）
+	taskBudget int  // 调用子代理的次数预算（0=不限制）
+	taskUsed   int  // 已调用子代理次数
 }
+
+// 默认步数与深度常量。
+const (
+	// defaultAgentSteps 默认最大工具调用轮数（原版 opencode 未显式配置时的回退值）。
+	defaultAgentSteps = 10
+	// defaultSubagentDepth 默认子代理嵌套深度上限（对齐原版默认值 3）。
+	// 原版配置未显式设置 subagent_depth 时用此值兜底。
+	defaultSubagentDepth = 3
+)
 
 // AgentOption 是 agent 创建选项。
 type AgentOption func(*AgentRuntime)
@@ -48,9 +61,24 @@ func WithMode(mode string) AgentOption {
 	return func(a *AgentRuntime) { a.Mode = mode }
 }
 
-// WithTools 设置工具白名单。
-func WithTools(tools []string) AgentOption {
+// WithTools 设置工具启用映射。
+func WithTools(tools map[string]bool) AgentOption {
 	return func(a *AgentRuntime) { a.Tools = tools }
+}
+
+// WithSteps 设置最大工具调用轮数。
+func WithSteps(steps int) AgentOption {
+	return func(a *AgentRuntime) { a.steps = steps }
+}
+
+// WithDepth 设置子代理嵌套深度。
+func WithDepth(depth int) AgentOption {
+	return func(a *AgentRuntime) { a.depth = depth }
+}
+
+// WithTaskBudget 设置调用子代理的次数预算。
+func WithTaskBudget(budget int) AgentOption {
+	return func(a *AgentRuntime) { a.taskBudget = budget }
 }
 
 // New 创建 agent 运行时。
@@ -173,8 +201,11 @@ func (a *AgentRuntime) processWithLLM(ctx context.Context, userInput string) (st
 	// 工具定义
 	tools := a.getToolDefinitions()
 
-	// 工具调用循环（最多 10 轮防止无限循环）
-	const maxRounds = 10
+	// 工具调用轮数上限：agent 配置优先，否则用默认值
+	maxRounds := a.steps
+	if maxRounds <= 0 {
+		maxRounds = defaultAgentSteps
+	}
 	for round := 0; round < maxRounds; round++ {
 		// 调用 LLM
 		streamCh, err := a.Provider.StreamComplete(ctx, provider.CompleteRequest{
@@ -313,17 +344,33 @@ func (a *AgentRuntime) getToolDefinitions() []provider.ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: struct {
+				Name        string         `json:"name"`
+				Description string         `json:"description"`
+				Parameters  map[string]any `json:"parameters"`
+			}{
+				Name:        "bash",
+				Description: "执行 shell 命令并返回 stdout/stderr/exit_code（Unix 用 sh，Windows 用 cmd）",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"command":     map[string]any{"type": "string", "description": "要执行的 shell 命令"},
+						"workdir":     map[string]any{"type": "string", "description": "工作目录（可选，默认当前目录）"},
+						"timeout_sec": map[string]any{"type": "integer", "description": "超时秒数（可选，默认 60）"},
+					},
+					"required": []string{"command"},
+				},
+			},
+		},
 	}
 
-	// 应用工具白名单
+	// 应用工具启用映射：nil/空=继承全部；非空时按 map 控制，未列出=禁用
 	if len(a.Tools) > 0 {
-		allowed := make(map[string]bool, len(a.Tools))
-		for _, t := range a.Tools {
-			allowed[t] = true
-		}
 		filtered := make([]provider.ToolDefinition, 0, len(allTools))
 		for _, t := range allTools {
-			if allowed[t.Function.Name] {
+			if a.Tools[t.Function.Name] {
 				filtered = append(filtered, t)
 			}
 		}
@@ -377,15 +424,33 @@ func (a *AgentRuntime) executeTool(ctx context.Context, tc provider.ToolCall) st
 		}
 		return fmt.Sprintf("edited %s, %d replacements", result.Path, result.Replacements)
 	case "task":
+		// task_budget 检查：单个 agent 调用子代理的次数预算
+		if a.taskBudget > 0 && a.taskUsed >= a.taskBudget {
+			return fmt.Sprintf("error: task budget %d exhausted", a.taskBudget)
+		}
 		input := tool.TaskInput{
 			SubagentName: getStringArg(args, "subagent_name"),
 			Prompt:       getStringArg(args, "prompt"),
+			Depth:        a.depth, // 注入调用者深度，供 SubagentManager 累积
 		}
-		result, err := tool.Task(input)
+		// ctx 透传：子 agent 跟随父 agent 生命周期，父 agent cancel 时子 agent 自动中止
+		result, err := tool.Task(ctx, input)
 		if err != nil {
 			return fmt.Sprintf("error: %v", err)
 		}
+		a.taskUsed++
 		return result.Output
+	case "bash":
+		input := tool.BashInput{
+			Command:    getStringArg(args, "command"),
+			WorkDir:    getStringArg(args, "workdir"),
+			TimeoutSec: getIntArg(args, "timeout_sec"),
+		}
+		result, err := tool.Bash(input)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return fmt.Sprintf("exit_code=%d\nstdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
 	default:
 		return fmt.Sprintf("error: unknown tool %s", name)
 	}
@@ -405,4 +470,17 @@ func getBoolArg(args map[string]any, key string) bool {
 		return v
 	}
 	return false
+}
+
+// getIntArg 从参数 map 获取整数值。
+func getIntArg(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
 }

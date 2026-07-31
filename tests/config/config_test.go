@@ -157,3 +157,127 @@ func TestLoadFromFixture(t *testing.T) {
 		t.Errorf("Model = %q, want %q", cfg.Model, "opencode/test-model")
 	}
 }
+
+// TestParseAgentSteps 测试 agent 的 steps / maxSteps 字段解析与回退
+func TestParseAgentSteps(t *testing.T) {
+	jsonData := []byte(`{
+		"model": "opencode/test",
+		"subagent_depth": 2,
+		"agent": {
+			"with_steps":    { "model": "opencode/test", "steps": 5 },
+			"with_maxsteps": { "model": "opencode/test", "maxSteps": 7 },
+			"with_both":     { "model": "opencode/test", "steps": 3, "maxSteps": 9 },
+			"with_neither":  { "model": "opencode/test" }
+		}
+	}`)
+
+	cfg, err := config.Parse(jsonData)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if cfg.SubagentDepth != 2 {
+		t.Errorf("SubagentDepth = %d, want 2", cfg.SubagentDepth)
+	}
+	tests := []struct {
+		name     string
+		fallback int
+		want     int
+	}{
+		{"with_steps", 99, 5},
+		{"with_maxsteps", 99, 7},
+		{"with_both", 99, 3},      // steps 优先于 maxSteps
+		{"with_neither", 99, 99},  // 回退到 fallback
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cfg.Agents[tt.name].ResolveSteps(tt.fallback)
+			if got != tt.want {
+				t.Errorf("ResolveSteps(%d) = %d, want %d", tt.fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseAgentFieldAlias 测试 agent/agents 字段名兼容
+func TestParseAgentFieldAlias(t *testing.T) {
+	// 原版标准字段名 "agent"（单数）
+	t.Run("standard_agent", func(t *testing.T) {
+		jsonData := []byte(`{
+			"model": "opencode/test",
+			"agent": {
+				"research": { "model": "opencode/test", "system": "via agent" }
+			}
+		}`)
+		cfg, err := config.Parse(jsonData)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		if len(cfg.Agents) != 1 {
+			t.Fatalf("Agents count = %d, want 1", len(cfg.Agents))
+		}
+		if cfg.Agents["research"].System != "via agent" {
+			t.Errorf("System = %q, want %q", cfg.Agents["research"].System, "via agent")
+		}
+	})
+
+	// 旧别名 "agents"（复数）
+	t.Run("alias_agents", func(t *testing.T) {
+		jsonData := []byte(`{
+			"model": "opencode/test",
+			"agents": {
+				"research": { "model": "opencode/test", "system": "via agents" }
+			}
+		}`)
+		cfg, err := config.Parse(jsonData)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		if len(cfg.Agents) != 1 {
+			t.Fatalf("Agents count = %d, want 1", len(cfg.Agents))
+		}
+		if cfg.Agents["research"].System != "via agents" {
+			t.Errorf("System = %q, want %q", cfg.Agents["research"].System, "via agents")
+		}
+	})
+
+	// "agent" 优先于 "agents"
+	t.Run("agent_takes_priority", func(t *testing.T) {
+		jsonData := []byte(`{
+			"model": "opencode/test",
+			"agent":  { "a1": { "model": "opencode/test" } },
+			"agents": { "a2": { "model": "opencode/test" } }
+		}`)
+		cfg, err := config.Parse(jsonData)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		if len(cfg.Agents) != 1 {
+			t.Fatalf("Agents count = %d, want 1 (agent should take priority)", len(cfg.Agents))
+		}
+		if _, ok := cfg.Agents["a1"]; !ok {
+			t.Error("expected 'a1' from 'agent' field, not found")
+		}
+	})
+}
+
+// TestParseTaskBudget 测试 task_budget 字段解析
+func TestParseTaskBudget(t *testing.T) {
+	jsonData := []byte(`{
+		"model": "opencode/test",
+		"agent": {
+			"limited":   { "model": "opencode/test", "task_budget": 3 },
+			"unlimited": { "model": "opencode/test" }
+		}
+	}`)
+
+	cfg, err := config.Parse(jsonData)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if cfg.Agents["limited"].TaskBudget != 3 {
+		t.Errorf("limited.TaskBudget = %d, want 3", cfg.Agents["limited"].TaskBudget)
+	}
+	if cfg.Agents["unlimited"].TaskBudget != 0 {
+		t.Errorf("unlimited.TaskBudget = %d, want 0", cfg.Agents["unlimited"].TaskBudget)
+	}
+}

@@ -156,7 +156,7 @@ $env:OPCODE_API_KEY="你的-Zen-API-Key"
 
 ### 2.6 配置子代理（多 Agent 并行）
 
-通过 `agents` 字段预定义子代理，主代理通过 `task` 工具调用：
+通过 `agent`（原版标准字段名，也支持旧别名 `agents`）预定义子代理，主代理通过 `task` 工具调用：
 
 ```json
 {
@@ -170,27 +170,44 @@ $env:OPCODE_API_KEY="你的-Zen-API-Key"
       }
     }
   },
-  "agents": {
+  "subagent_depth": 3,
+  "agent": {
     "research": {
-      "model": "opencode/deepseek-v4-flash-free",
+      "model": "opencode/deepseek-v4-flash",
       "system": "你是一个调研助手，负责收集和整理信息",
-      "mode": "subagent"
+      "mode": "subagent",
+      "steps": 8,
+      "task_budget": 3
     },
     "writer": {
-      "model": "opencode/grok-3",
+      "model": "opencode/grok-4.5",
       "system": "你是一个写作助手，擅长润色和组织文本",
       "mode": "subagent",
-      "tools": ["read", "write", "edit"]
+      "tools": { "read": true, "write": true, "edit": true }
+    },
+    "safe_runner": {
+      "model": "opencode/glm-5.2",
+      "system": "只读分析助手，不修改文件不执行命令",
+      "mode": "subagent",
+      "tools": { "bash": false, "task": false, "write": false, "edit": false }
     }
   }
 }
 ```
 
 字段说明：
+
+**顶层字段：**
+- `subagent_depth`：子代理最大嵌套深度（原版标准字段，默认 1，极简版兜底 3）。主代理 depth=0，每调一层子代理 depth+1，超过则拒绝。防止子 agent 递归失控。
+
+**每个 agent 的字段：**
 - `model`：子代理使用的模型（不填则继承主代理）
 - `system`：系统提示词
 - `mode`：`subagent`（仅可被调用）/ `primary`（仅主用）/ `all`（两者皆可）
-- `tools`：工具白名单（不填则全部可用：read/write/edit/task）
+- `tools`：工具启用/禁用映射（原版 schema 字段，map 风格）。`nil`/空=继承全部；非空时按 map 控制每个工具，未列出的工具默认禁用。例：`{"bash": false}` 禁用 bash 其余可用；`{"read": true}` 仅启用 read
+- `steps`：该 agent 最大工具调用轮数（原版标准字段，默认 10）。达到上限后强制返回纯文本响应
+- `maxSteps`：`steps` 的废弃别名（旧版配置兼容，优先级低于 `steps`）
+- `task_budget`：该 agent 调用子代理的次数预算（原版标准字段，0=不限制）
 
 ### 2.7 配置文件兼容性
 
@@ -200,7 +217,12 @@ ago 复用 opencode 原版 `opencode.json` 格式，**仅解析核心字段**：
 |------|---------|------|
 | `model` | ✓ | 默认模型 ID |
 | `provider` | ✓ | 自定义 provider map |
-| `agents` | ✓ | 子代理配置 |
+| `agent` | ✓ | 子代理配置（原版标准字段名） |
+| `agents` | ✓ | 子代理配置（旧别名，`agent` 优先） |
+| `subagent_depth` | ✓ | 子代理最大嵌套深度（默认 3） |
+| `agent[].steps` / `agent[].maxSteps` | ✓ | agent 最大工具调用轮数 |
+| `agent[].task_budget` | ✓ | agent 调用子代理次数预算 |
+| `agent[].tools` | ✓ | 工具启用/禁用映射（map 风格，原版 schema 字段） |
 | `$schema` / `shell` / `mcp` / `lsp` / `formatter` / `permissions` / `watcher` / 其他 | ✗ | 解析后忽略，不报错，保持加载兼容 |
 
 你的现有 opencode.json 可以**直接加载不崩溃**，但 mcp/lsp 等功能不实现。
@@ -257,16 +279,17 @@ ago 复用 opencode 原版 `opencode.json` 格式，**仅解析核心字段**：
 
 ## 4. 核心工具
 
-主代理和子代理（未设白名单时）均可用以下四个工具，由 LLM 自主决定调用：
+主代理和子代理（未设白名单时）均可用以下五个工具，由 LLM 自主决定调用：
 
 | 工具 | 入参 | 作用 |
 |------|------|------|
 | `read` | `path` | 读文件内容或列目录 |
 | `write` | `path`, `content` | 写文件（自动创建父目录） |
 | `edit` | `path`, `old_string`, `new_string`, `replace_all?` | 字符串精确替换 |
-| `task` | `subagent_name`, `prompt` | 调用子代理执行任务 |
+| `task` | `subagent_name`, `prompt` | 调用子代理执行任务（跟随父 agent context 生命周期，无固定超时） |
+| `bash` | `command`, `workdir?`, `timeout_sec?` | 执行 shell 命令（Unix 用 sh，Windows 用 cmd，超时由 LLM 传 timeout_sec 控制） |
 
-工具调用循环上限 10 轮，防止无限调用。
+工具调用轮数上限由 agent 的 `steps` 配置决定（默认 10 轮），防止无限调用。每个工具可在 agent 配置中通过 `tools` 字段禁用。
 
 ---
 
@@ -310,7 +333,7 @@ A：触发限流。免费模式限流较严，建议降低并发或切换付费�
 A：默认 5 分钟超时。若任务确实耗时更长，修改 `internal/agent/subagent.go` 的 `subagentTimeout` 常量后重新编译。
 
 ### Q6：工具调用死循环
-A：程序已限制最多 10 轮工具调用。若 LLM 反复调用同一工具，检查 system prompt 是否清晰引导任务收敛。
+A：每个 agent 的工具调用轮数由 `steps` 配置控制（默认 10 轮）。子代理调用次数由 `task_budget` 控制（0=不限制）。子代理嵌套深度由 `subagent_depth` 控制（默认 3 层）。三层防护避免递归失控。若 LLM 反复调用同一工具，检查 system prompt 是否清晰引导任务收敛。
 
 ### Q7：如何确认 LLM 真的返回了
 A：加 `-debug` 启动，会输出 agent 启停、子代理完成等日志到 stderr。
@@ -328,7 +351,7 @@ ago/
 │   ├── config/             ← opencode.json 解析
 │   ├── provider/           ← LLM Provider（OpenAI 兼容 + Anthropic + opencode）
 │   ├── agent/              ← Agent 运行时 + 子代理管理
-│   ├── tool/               ← read/write/edit/task 工具
+│   ├── tool/               ← read/write/edit/task/bash 工具
 │   └── transport/          ← 本机 channel 通信
 ├── tests/                  ← 测试代码
 ├── docs/                   ← 文档（本文件 + 计划文件）

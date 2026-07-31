@@ -17,8 +17,15 @@ type Config struct {
 	// Provider 自定义 provider map，key 是 provider id（如 opencode/openai/anthropic）
 	Provider map[string]ProviderConfig `json:"provider,omitempty"`
 
-	// Agents 子代理 map，key 是 agent id（如 research/build）
-	Agents map[string]AgentConfig `json:"agents,omitempty"`
+	// Agents 子代理 map，key 是 agent id（如 research/build）。
+	// JSON tag 用 "agent" 对齐原版实际配置文件（opencode.json）。
+	// 同时支持 "agents" 别名（自定义 UnmarshalJSON）。
+	Agents map[string]AgentConfig `json:"agent,omitempty"`
+
+	// SubagentDepth 子代理最大嵌套深度（原版标准字段，默认 3）。
+	// 主代理 depth=0，每调一层子代理 depth+1，超过则拒绝。
+	// 原版默认 3；此处 0 表示未配置，由 agent 层回退到 defaultSubagentDepth。
+	SubagentDepth int `json:"subagent_depth,omitempty"`
 
 	// 兼容字段：用 RawMessage 接收后忽略，保持加载不报错
 	Schema       json.RawMessage `json:"$schema,omitempty"`
@@ -136,8 +143,35 @@ type AgentConfig struct {
 	// Hidden 是否隐藏（不在选择列表显示）
 	Hidden bool `json:"hidden,omitempty"`
 
-	// Tools 工具白名单（空表示继承全部）
-	Tools []string `json:"tools,omitempty"`
+	// Tools 工具启用/禁用映射（对齐原版 schema 的 tools 字段，原版已 @deprecated 但兼容）。
+	// key=工具名（read/write/edit/task/bash），value=true 启用 / false 禁用。
+	// 语义：nil/空=继承全部；非空时按 map 控制每个工具，未列出的工具默认禁用。
+	// 例：{"bash": false} 表示除 bash 外全部可用；{"read": true} 表示仅 read 可用。
+	Tools map[string]bool `json:"tools,omitempty"`
+
+	// Steps 最大工具调用轮数（对齐原版 schema 的 steps 字段）。
+	// 达到上限后强制返回纯文本响应，防止 agent 无限循环。
+	// 0 表示用默认值 defaultAgentSteps。
+	Steps int `json:"steps,omitempty"`
+
+	// MaxSteps 废弃字段，对齐原版 schema 的 maxSteps（已废弃，用 steps 替代）。
+	// 兼容旧版配置文件：若 Steps 未设而 MaxSteps 已设，则用 MaxSteps。
+	MaxSteps int `json:"maxSteps,omitempty"`
+
+	// TaskBudget 单个 agent 调用子代理的次数预算（原版标准字段）。
+	// 0 表示不限制（回退到 subagent_depth 兜底）。
+	TaskBudget int `json:"task_budget,omitempty"`
+}
+
+// ResolveSteps 解析 agent 的有效步数：Steps 优先，其次 MaxSteps（废弃别名），最后回退到 fallback。
+func (a AgentConfig) ResolveSteps(fallback int) int {
+	if a.Steps > 0 {
+		return a.Steps
+	}
+	if a.MaxSteps > 0 {
+		return a.MaxSteps
+	}
+	return fallback
 }
 
 // envPlaceholderRe 匹配 {env:VAR} 占位符。
@@ -153,10 +187,20 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse 解析配置 JSON。
+// 同时支持 "agent"（原版标准字段名）和 "agents"（旧别名）两种字段名。
 func Parse(data []byte) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	// 兼容旧别名 "agents"：若 "agent" 未填而 "agents" 有值，则采用 "agents"。
+	if len(cfg.Agents) == 0 {
+		var alias struct {
+			Agents map[string]AgentConfig `json:"agents"`
+		}
+		if err := json.Unmarshal(data, &alias); err == nil && len(alias.Agents) > 0 {
+			cfg.Agents = alias.Agents
+		}
 	}
 	return &cfg, nil
 }

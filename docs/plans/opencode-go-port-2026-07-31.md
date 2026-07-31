@@ -38,18 +38,19 @@
 - **删除**：MCP、bash/glob/grep/list/webfetch 等非核心工具、跨机 TCP 通信、自研 retry/overload 框架（依赖 Go channel 原生 + context）、递归式无限派生（改为 opencode 配置式子代理）、LSP/formatter/watcher/snapshots/permissions 等非核心配置字段、catalog/models-dev 动态拉取（改为静态配置）、Effect 函数式框架（用 Go 原生重写逻辑）。
 
 ### 验收标准
-1. **配置兼容**：能读取标准 `opencode.json`（极简解析：识别 `model`、`provider`、`agents` 三个核心字段；其他字段如 `mcp`/`lsp`/`formatter`/`permissions`/`watcher` 等解析后忽略不报错，保持兼容），用户现有 opencode 配置可加载不崩溃。
+1. **配置兼容**：能读取标准 `opencode.json`（极简解析：识别 `model`、`provider`、`agent`（原版标准字段名，也支持旧别名 `agents`）、`subagent_depth`、agent 级 `steps`/`maxSteps`/`task_budget` 等核心字段；其他字段如 `mcp`/`lsp`/`formatter`/`permissions`/`watcher` 等解析后忽略不报错，保持兼容），用户现有 opencode 配置可加载不崩溃。
 2. **Provider 可用**：实现 OpenAI 兼容协议 + Anthropic Messages 协议两套，覆盖大部分主流模型。
 3. **opencode provider 可用（双模式）**：
    - **免费模式**：未配置 apiKey 时，硬编码 `apiKey=public`，仅暴露 cost.input=0 的免费模型，通过 OpenAI 兼容协议调用 `https://opencode.ai/zen/v1/chat/completions`，用户无需登录即可使用免费模型（对齐原版 `packages/opencode/src/provider/provider.ts` 第 179-201 行逻辑）。
    - **付费模式**：用户配置 apiKey 时，Bearer 鉴权，所有模型可用。
    - 仅覆盖走 chat/completions 端点的 Zen 模型（Grok/DeepSeek/MiniMax/GLM/Kimi/免费模型等）。
-4. **主代理 + 子代理**：通过 `opencode.json` 的 `agents` 字段定义子代理（含 model + system prompt + mode），主代理通过 `task` 工具调用子代理。
-5. **核心工具**：read（读文件）、write（写文件）、edit（编辑文件）三个工具可用。
+4. **主代理 + 子代理**：通过 `opencode.json` 的 `agent` 字段定义子代理（含 model + system prompt + mode + steps + task_budget），主代理通过 `task` 工具调用子代理。`subagent_depth` 控制最大嵌套深度（默认 3）。
+5. **核心工具**：read（读文件）、write（写文件）、edit（编辑文件）、task（调用子代理）、bash（执行 shell 命令）五个工具可用。
 6. **超高并发**：每个 agent 独立 goroutine + 独立 MsgChan，主代理可并行调用多个子代理，利用 Go GMP 实现高并发。
 7. **本进程通信**：主子代理通过 Go channel 通信，无网络开销。
+8. **递归防护**：三层防护避免 agent 递归失控 —— `steps`（单 agent 工具调用轮数）、`task_budget`（单 agent 调用子代理次数）、`subagent_depth`（最大嵌套深度）。
 
-> 明确不做：MCP、跨机通信、自研二进制协议、TCP 连接池、自研 retry/overload 框架、bash/glob/grep/list/webfetch 工具、递归式无限派生、catalog/models-dev 动态拉取、Effect 框架、LSP/formatter/watcher 等非核心配置。
+> 明确不做：MCP、跨机通信、自研二进制协议、TCP 连接池、自研 retry/overload 框架、glob/grep/list/webfetch 工具、catalog/models-dev 动态拉取、Effect 框架、LSP/formatter/watcher 等非核心配置。
 
 ---
 
@@ -105,7 +106,7 @@
 | config | opencode.json 解析 | 仅解析 model/provider/agents 核心字段，其他忽略 | `packages/core/src/config.ts` |
 | provider | OpenAI 兼容 + Anthropic Messages 协议 + factory | 不做 catalog 动态拉取 | `packages/llm/src/protocols/*.ts` |
 | agent | 主代理 + 子代理 | opencode 配置式，非递归派生 | `packages/core/src/agent.ts` |
-| tool | read/write/edit/task | 仅核心三工具 + task 调用子代理 | `packages/core/src/tool/{read,write,edit}.ts` |
+| tool | read/write/edit/task/bash | 仅核心工具 + task 调用子代理 + bash 执行命令 | `packages/core/src/tool/{read,write,edit}.ts` |
 | transport | 本机 channel | 无网络协议 | 自研 |
 
 ---
@@ -226,21 +227,22 @@ opencode-go/
    - `api.type=aisdk` + `api.package=@ai-sdk/openai` → OpenAI 兼容（极简版归一处理）
    - 其他 → 默认走 OpenAI 兼容（极简降级）
 
-### 阶段 D：tool 工具层（仅核心三件 + task）
+### 阶段 D：tool 工具层（核心工具 + task + bash）
 9. 新建 `internal/tool/read.go`：`read(path)` 工具（参考 `packages/core/src/tool/read.ts`），读文件内容返回，支持文本和图片 base64。
 10. 新建 `internal/tool/write.go`：`write(path, content)` 工具（参考 `packages/core/src/tool/write.ts`），写文件。
 11. 新建 `internal/tool/edit.go`：`edit(path, old_string, new_string)` 工具（参考 `packages/core/src/tool/edit.ts`），字符串替换编辑。
-12. 新建 `internal/tool/task.go`：`task(subagent_name, prompt)` 工具，调用配置中定义的子代理，返回子代理执行结果。
+12. 新建 `internal/tool/task.go`：`task(subagent_name, prompt)` 工具，调用配置中定义的子代理，返回子代理执行结果。Depth 字段由 agent 层注入（json:"-"），控制递归深度。
+13. 新建 `internal/tool/bash.go`：`bash(command, workdir?, timeout_sec?)` 工具，跨平台执行 shell 命令（Unix 用 sh，Windows 用 cmd），超时保护（Windows 用 taskkill /F /T kill 进程树）。
 
 ### 阶段 E：transport 本机通信层
-13. 新建 `internal/transport/local.go`：定义 `Message` 结构体（SrcAgentID、DstAgentID、Type、Payload）+ channel 收发接口。本机直接传指针，不序列化。
+14. 新建 `internal/transport/local.go`：定义 `Message` 结构体（SrcAgentID、DstAgentID、Type、Payload）+ channel 收发接口。本机直接传指针，不序列化。
 
 ### 阶段 F：agent 运行时（主代理 + 子代理 + 高并发）
-14. 新建 `internal/agent/agent.go`（参考 `packages/core/src/agent.ts` + `packages/schema/src/agent.ts`）：
-    - `AgentRuntime` 结构体：AgentID、MsgChan（chan *Message）、Model、SystemPrompt、Mode（primary/subagent/all）、Tools 白名单、Provider 引用。
+15. 新建 `internal/agent/agent.go`（参考 `packages/core/src/agent.ts` + `packages/schema/src/agent.ts`）：
+    - `AgentRuntime` 结构体：AgentID、MsgChan（chan *Message）、Model、SystemPrompt、Mode（primary/subagent/all）、Tools 白名单、Provider 引用、steps（工具调用轮数上限）、depth（嵌套深度）、taskBudget/taskUsed（子代理调用预算）。
     - `Start()` 方法：启动独立 goroutine 跑消息循环（接收消息 → 调用 provider 流式推理 → 调用工具 → 返回结果）。
     - `Stop()` 方法：关闭 MsgChan，退出 goroutine。
-15. 新建 `internal/agent/subagent.go`：子代理调用逻辑，主代理通过 `task` 工具触发：
+16. 新建 `internal/agent/subagent.go`：子代理调用逻辑，主代理通过 `task` 工具触发：
     - 根据子代理名从配置查找定义。
     - 实例化子 AgentRuntime，启动独立 goroutine。
     - 主代理同步等待子代理结果（通过 channel）。
@@ -248,8 +250,8 @@ opencode-go/
     - 多个 task 调用可并行（主代理发起多个子代理 goroutine，Go GMP 调度）。
 
 ### 阶段 G：入口整合
-16. 新建 `cmd/opencode/main.go`：加载 opencode.json → 初始化 provider → 初始化主 agent → 启动主循环（读取用户输入 → 主代理处理 → 输出结果）。
-17. 初始化 `go.mod`（module 名 `opencode-go`）。
+17. 新建 `cmd/opencode/main.go`：加载 opencode.json → 初始化 provider → 初始化主 agent → 启动主循环（读取用户输入 → 主代理处理 → 输出结果）。
+18. 初始化 `go.mod`（module 名 `opencode-go`）。
 
 ---
 

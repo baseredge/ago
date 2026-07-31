@@ -14,7 +14,7 @@ ago/
 │   ├── config/         # 配置层（opencode.json 解析）
 │   ├── provider/       # LLM Provider 子系统
 │   ├── agent/          # Agent 运行时
-│   ├── tool/           # 核心工具（read/write/edit/task）
+│   ├── tool/           # 核心工具（read/write/edit/task/bash）
 │   └── transport/      # 本进程内通信层
 ├── pkg/                # 对外可复用库（暂留空，按需扩展）
 ├── docs/
@@ -48,5 +48,5 @@ ago/
 | config | opencode.json 解析 | LLM 调用、工具执行 |
 | provider | LLM Provider 接口与实现 | Agent 调度 |
 | agent | AgentRuntime、主子代理 | 文件 IO、网络协议 |
-| tool | read/write/edit/task 工具 | LLM 调用 |
+| tool | read/write/edit/task/bash 工具 | LLM 调用 |
 | transport | 本机 channel 通信 | 网络协议、文件 IO |
