@@ -1,0 +1,32 @@
+# 二进制产物
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试覆盖率
+*.prof
+*.out
+coverage.txt
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时目录
+tmp/
+*.tmp
+
+# 配置文件中的敏感信息（按需取消注释）
+# opencode.json
+# .env

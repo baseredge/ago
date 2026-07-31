@@ -1,0 +1,26 @@
+{
+  "model": "opencode/test-model",
+  "provider": {
+    "opencode": {
+      "name": "Test Provider",
+      "options": {
+        "baseURL": "https://opencode.ai/zen/v1"
+      },
+      "models": {
+        "test-model": {
+          "name": "Test Model",
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
+    }
+  },
+  "agents": {
+    "helper": {
+      "model": "opencode/test-model",
+      "system": "测试助手",
+      "mode": "subagent"
+    }
+  },
+  "mcp": { "test": {} },
+  "lsp": { "gopls": {} }
+}
